@@ -5,48 +5,53 @@ import com.tienda.pedidos.dto.PedidoResponseDTO;
 import com.tienda.pedidos.entity.Pedido;
 import com.tienda.pedidos.exception.RecursoNoEncontradoException;
 import com.tienda.pedidos.repository.PedidoRepository;
+import com.tienda.pedidos.strategy.EstrategiaDescuento;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * Implementación de PedidoService aplicando Inversión de Dependencias (DIP).
- * Todos los colaboradores (PedidoRepository, NotificacionService) son finales e inyectados
- * a través del constructor, eliminando el acoplamiento rígido del operador 'new'.
+ * Implementación de PedidoService aplicando Inversión de Dependencias (DIP)
+ * y el Patrón Strategy para la resolución dinámica de políticas de descuento comercial.
+ * Cumple con el Principio Abierto/Cerrado (OCP): nuevas estrategias se inyectan automáticamente
+ * a través del mapa de beans de Spring sin modificar el código de este servicio.
  */
 @Service
 public class PedidoServiceImpl implements PedidoService {
 
     private final PedidoRepository pedidoRepository;
     private final NotificacionService notificacionService;
+    private final Map<String, EstrategiaDescuento> estrategias;
 
-    // Inyección explícita por constructor (DIP)
-    public PedidoServiceImpl(PedidoRepository pedidoRepository, NotificacionService notificacionService) {
+    // Inyección por constructor de dependencias y mapa dinámico de estrategias
+    public PedidoServiceImpl(PedidoRepository pedidoRepository,
+                             NotificacionService notificacionService,
+                             Map<String, EstrategiaDescuento> estrategias) {
         this.pedidoRepository = pedidoRepository;
         this.notificacionService = notificacionService;
+        this.estrategias = estrategias;
     }
 
     @Override
     @Transactional
     public PedidoResponseDTO crearPedido(PedidoRequestDTO requestDTO) {
         double subtotal = requestDTO.getSubtotal();
-        String tipoCliente = requestDTO.getTipoCliente().trim().toUpperCase();
+        String tipoCliente = requestDTO.getTipoCliente() != null 
+                ? requestDTO.getTipoCliente().trim().toUpperCase() 
+                : "REGULAR";
 
-        // Cálculo temporal base antes de extraer a patrón Strategy (Commit 4)
-        double porcentajeDescuento = 0.0;
-        if ("VIP".equalsIgnoreCase(tipoCliente)) {
-            porcentajeDescuento = 0.15;
-        } else if ("MAYORISTA".equalsIgnoreCase(tipoCliente)) {
-            porcentajeDescuento = 0.25;
-        }
+        // Resolución dinámica de la estrategia de descuento (getOrDefault aplica fallback a REGULAR)
+        EstrategiaDescuento estrategia = estrategias.getOrDefault(tipoCliente, estrategias.get("REGULAR"));
 
-        double descuento = subtotal * porcentajeDescuento;
+        double descuento = Math.round(estrategia.calcularDescuento(subtotal) * 100.0) / 100.0;
+        double porcentajeDescuento = estrategia.getPorcentaje();
         double baseConDescuento = subtotal - descuento;
-        double iva = baseConDescuento * 0.19;
-        double total = baseConDescuento + iva;
+        double iva = Math.round((baseConDescuento * 0.19) * 100.0) / 100.0;
+        double total = Math.round((baseConDescuento + iva) * 100.0) / 100.0;
 
         Pedido pedido = new Pedido();
         pedido.setClienteEmail(requestDTO.getClienteEmail().trim());
@@ -61,9 +66,9 @@ public class PedidoServiceImpl implements PedidoService {
 
         Pedido guardado = pedidoRepository.save(pedido);
 
-        // Envío desacoplado de notificación
+        // Notificación al cliente
         notificacionService.enviarNotificacion(guardado.getClienteEmail(),
-                "Su pedido #" + guardado.getId() + " ha sido creado exitosamente.");
+                "Su pedido #" + guardado.getId() + " ha sido procesado exitosamente por un total de $" + total);
 
         return toResponseDTO(guardado);
     }
@@ -86,7 +91,7 @@ public class PedidoServiceImpl implements PedidoService {
     }
 
     /**
-     * Mapeo privado y seguro de Entidad a DTO de Respuesta.
+     * Mapeo privado y seguro de Entidad JPA a DTO de Respuesta.
      * GARANTÍA DE SEGURIDAD: El campo 'notasInternas' jamás se mapea al DTO.
      */
     private PedidoResponseDTO toResponseDTO(Pedido pedido) {
